@@ -1,0 +1,10 @@
+export const AGE = { healthy: '18+', heavy: '18+', minor: '13–15', political: '18+', adult: '18+', mixed: '16–17' };
+
+export const profiles = {
+  healthy:{name:'Rohan',label:'Healthy User',desc:'Balanced habits, varied feed, 78 wellbeing',screen:128,goal:180,late:8,long:1,alerts:1,videos:42,platforms:[['YouTube',48,'#ff647c'],['Instagram',38,'#916cf5'],['LinkedIn',14,'#42a5f5']],cats:[['Education',31],['Technology',24],['Entertainment',19],['Sports',14],['News',12]]},
+  heavy:{name:'Kabir',label:'Heavy Scroller',desc:'5h 12m, late night, doomscrolling risk',screen:312,goal:180,late:67,long:4,alerts:7,videos:164,platforms:[['Instagram',52,'#916cf5'],['YouTube Shorts',36,'#ff647c'],['X',12,'#202938']],cats:[['Entertainment',47],['News',21],['Emotional manipulation',14],['Gaming',10],['Education',8]]},
+  minor:{name:'Aanya',label:'Minor User',desc:'Age-aware policy and controlled safety intervention',screen:178,goal:150,late:34,long:2,alerts:4,videos:81,platforms:[['Instagram',55,'#916cf5'],['YouTube',31,'#ff647c'],['Facebook',14,'#4c8bf5']],cats:[['Entertainment',36],['Education',22],['Politics',13],['Adult/18+',8],['Technology',12],['Sports',9]]},
+  political:{name:'Meera',label:'News/Political-heavy',desc:'31% political content, verification warnings',screen:224,goal:180,late:21,long:2,alerts:6,videos:74,platforms:[['X',43,'#202938'],['YouTube',32,'#ff647c'],['Instagram',25,'#916cf5']],cats:[['Politics',31],['News',26],['Education',17],['Technology',14],['Entertainment',12]]},
+  adult:{name:'Arjun',label:'Adult-content-heavy',desc:'Neutral, private exposure trend and wellbeing guidance',screen:269,goal:180,late:51,long:3,alerts:5,videos:119,platforms:[['Instagram',46,'#916cf5'],['YouTube',42,'#ff647c'],['X',12,'#202938']],cats:[['Entertainment',38],['Adult/18+',24],['Technology',16],['News',12],['Sports',10]]},
+  mixed:{name:'Zoya',label:'Mixed User',desc:'Balanced sample with a few safety signals',screen:202,goal:180,late:18,long:2,alerts:2,videos:66,platforms:[['Instagram',40,'#916cf5'],['YouTube',38,'#ff647c'],['Facebook',22,'#4c8bf5']],cats:[['Entertainment',28],['Education',24],['Technology',19],['News',15],['Sports',14]]}
+};
