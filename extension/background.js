@@ -1,5 +1,5 @@
 const API_DEFAULT='http://localhost:4173';const sessions=new Map();
-const platform=url=>url.includes('youtube.com')?'youtube':url.includes('instagram.com')?'instagram':url.includes('facebook.com')?'facebook':url.includes('x.com')||url.includes('twitter.com')?'x':url.includes('web.telegram.org')?'telegram':null;
+const platform=url=>url.includes('youtube.com')?'youtube':url.includes('instagram.com')?'instagram':url.includes('facebook.com')?'facebook':url.includes('x.com')||url.includes('twitter.com')?'x':url.includes('web.telegram.org')||url.includes('t.me')?'telegram':null;
 async function settings(){return await chrome.storage.local.get({apiUrl:API_DEFAULT,token:''});}
 async function request(path,body){const s=await settings();const r=await fetch(`${s.apiUrl}${path}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${s.token}`},body:JSON.stringify(body)});if(!r.ok)throw new Error((await r.json()).error||'Request failed');return r.status===204?{}:r.json();}
 chrome.tabs.onUpdated.addListener(async(id,change,tab)=>{if(change.status!=='complete'||!tab.url)return;const p=platform(tab.url);if(!p)return;try{const x=await request('/sessions/start',{platform:p});sessions.set(id,x.sessionId);chrome.tabs.sendMessage(id,{type:'guard-state',state:'safe'});}catch{chrome.tabs.sendMessage(id,{type:'guard-state',state:'offline'});}});
