@@ -11,6 +11,9 @@ export const pool = process.env.DATABASE_URL
 export async function migrate() {
   const statements = [
     `CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, age_group TEXT NOT NULL CHECK(age_group IN ('under_13','13_15','16_17','18_plus')), consent_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS monitoring_enabled BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_goal_minutes INTEGER NOT NULL DEFAULT 120`,
     `CREATE TABLE IF NOT EXISTS sessions (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT now(), ended_at TIMESTAMPTZ, duration_seconds INTEGER)`,
     `CREATE TABLE IF NOT EXISTS content_events (id UUID PRIMARY KEY, session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, platform TEXT NOT NULL, content_identifier TEXT, page_url TEXT, content_hash TEXT NOT NULL, title TEXT, occurred_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
     `CREATE TABLE IF NOT EXISTS analysis_results (id UUID PRIMARY KEY, content_event_id UUID NOT NULL REFERENCES content_events(id) ON DELETE CASCADE, category TEXT NOT NULL, risk_level TEXT NOT NULL, confidence NUMERIC(4,3) NOT NULL, explanation TEXT NOT NULL, claim_classification TEXT NOT NULL, evidence_json JSONB NOT NULL DEFAULT '[]', created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
@@ -18,6 +21,8 @@ export async function migrate() {
     `CREATE INDEX IF NOT EXISTS sessions_user_started_idx ON sessions(user_id, started_at DESC)`,
     `CREATE INDEX IF NOT EXISTS content_events_session_idx ON content_events(session_id, occurred_at DESC)`,
     `CREATE INDEX IF NOT EXISTS warnings_user_shown_idx ON warnings(user_id, shown_at DESC)`
+    ,`UPDATE sessions older SET ended_at=now(), duration_seconds=GREATEST(0, EXTRACT(EPOCH FROM (now()-older.started_at))::int) WHERE older.ended_at IS NULL AND EXISTS (SELECT 1 FROM sessions newer WHERE newer.user_id=older.user_id AND newer.platform=older.platform AND newer.ended_at IS NULL AND newer.started_at>older.started_at)`
+    ,`CREATE UNIQUE INDEX IF NOT EXISTS one_active_session_per_platform ON sessions(user_id, platform) WHERE ended_at IS NULL`
   ];
   for (const sql of statements) await pool.query(sql);
 }
