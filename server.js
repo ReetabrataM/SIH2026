@@ -1,43 +1,44 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { classify, policy, wellbeing, recommendation } from './src/engine.js';
-import { profiles, AGE } from './src/profiles.js';
+import { randomUUID } from 'node:crypto';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { migrate, pool } from './src/db.js';
+import { analyzeContent, policy } from './src/analysis.js';
 
 const root = process.cwd(), port = Number(process.env.PORT || 4173), host = process.env.HOST || '127.0.0.1';
-const storeFile = join(root, 'data', 'safescroll.json'), clients = new Set();
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8' };
-let store = { profiles: structuredClone(profiles), events: [] };
-
-async function loadStore() { try { store = JSON.parse(await readFile(storeFile, 'utf8')); } catch { await persist(); } }
-async function persist() { await mkdir(join(root, 'data'), { recursive: true }); await writeFile(storeFile, JSON.stringify(store, null, 2)); }
-function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(data)); }
-function broadcast(payload) { const line = `data: ${JSON.stringify(payload)}\n\n`; for (const client of clients) client.write(line); }
-function snapshot(profileId) { const p = store.profiles[profileId]; if (!p) return null; const profileEvents = store.events.filter(e => e.profileId === profileId); const score = wellbeing({ screenMinutes: p.screen, goalMinutes: p.goal, lateMinutes: p.late, longSessions: p.long, safetyEvents: p.alerts, categories: new Set(p.cats.map(x => x[0])) }); return { profile: p, age: AGE[profileId], events: profileEvents.slice(0, 25), score, recommendation: recommendation({ screenMinutes:p.screen, goalMinutes:p.goal, lateMinutes:p.late, longSessions:p.long }) }; }
-function validEvent(body) { return body && typeof body.profileId === 'string' && store.profiles[body.profileId] && typeof body.category === 'string' && body.category.length <= 64 && typeof body.platform === 'string' && body.platform.length <= 64; }
-function connectorStatus() { return [
-  { id:'instagram', name:'Instagram', provider:'Meta Graph API', configured:Boolean(process.env.INSTAGRAM_CLIENT_ID), capabilities:['Authorized business/creator account insights','Webhook-driven owned-account events'], limitation:'Meta APIs do not provide unrestricted access to a user’s personal feed or private messages.' },
-  { id:'facebook', name:'Facebook', provider:'Meta Graph API', configured:Boolean(process.env.FACEBOOK_CLIENT_ID), capabilities:['Page insights','User-authorized Page content and webhooks'], limitation:'Only approved permissions and user-authorized Page data can be used.' },
-  { id:'youtube', name:'YouTube', provider:'YouTube Data & Analytics APIs', configured:Boolean(process.env.YOUTUBE_CLIENT_ID), capabilities:['Authorized channel analytics','Playlist/activity metadata within approved scopes'], limitation:'OAuth and Google verification may be required for sensitive scopes.' },
-  { id:'x', name:'X', provider:'X API v2', configured:Boolean(process.env.X_CLIENT_ID), capabilities:['User-context data within granted OAuth scopes','Webhook/poll based monitoring where product access permits'], limitation:'Access depends on the X developer plan, scopes, and endpoint availability.' }
-]; }
-async function body(req) { let chunks = '', size = 0; for await (const c of req) { size += c.length; if (size > 16_384) throw Error('Request body too large'); chunks += c; } return JSON.parse(chunks || '{}'); }
-async function handleEvent(input) { const p = store.profiles[input.profileId], c = classify(input.caption || input.category, input.category); const prior = store.events.filter(e => e.profileId === input.profileId && e.category === c.category).length; const decision = policy({ age: AGE[input.profileId], classification: c, repetition: prior, sessionMinutes: Math.round(p.screen / (p.long + 3)) });
-  p.screen += Math.max(1, Math.min(10, Number(input.durationMinutes) || 3)); p.videos += 1; if (decision.level > 0) p.alerts += 1;
-  const event = { id: crypto.randomUUID(), profileId: input.profileId, category:c.category, platform:input.platform, confidence:Math.round(c.confidence*100), severity:c.severity, decision, explanation:c.explanation, createdAt:new Date().toISOString() }; store.events.unshift(event); store.events = store.events.slice(0, 500); await persist(); const update = { type:'analytics.updated', profileId:input.profileId, event, snapshot:snapshot(input.profileId) }; broadcast(update); return update;
+const jwtSecret = process.env.JWT_SECRET;
+if (!process.env.DATABASE_URL || !jwtSecret) throw new Error('DATABASE_URL and JWT_SECRET are required. Copy .env.example to .env for local development.');
+const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.json':'application/json; charset=utf-8' }, streams = new Map();
+const json = (res, status, data) => { res.writeHead(status, { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' }); res.end(JSON.stringify(data)); };
+async function parse(req) { let raw='', size=0; for await (const c of req) { size+=c.length; if(size>32_768) throw Error('Payload too large'); raw+=c; } return JSON.parse(raw||'{}'); }
+function token(req) { const h=req.headers.authorization||''; return h.startsWith('Bearer ')?h.slice(7):null; }
+function user(req) { try { return jwt.verify(token(req),jwtSecret); } catch { return null; } }
+function requireUser(req,res) { const u=user(req); if(!u){json(res,401,{error:'Authentication required.'});return null;} return u; }
+function emit(userId,payload){const line=`data: ${JSON.stringify(payload)}\n\n`;for(const r of streams.get(userId)||[])r.write(line);}
+function age(value){return ['under_13','13_15','16_17','18_plus'].includes(value);}
+async function summary(userId){const [usage,warnings,platforms,cats] = await Promise.all([
+  pool.query(`SELECT COALESCE(SUM(COALESCE(duration_seconds, EXTRACT(EPOCH FROM(now()-started_at))::int)),0)::int total, COALESCE(MAX(COALESCE(duration_seconds,0)),0)::int longest, COUNT(*)::int sessions FROM sessions WHERE user_id=$1 AND started_at>=date_trunc('day',now())`,[userId]),
+  pool.query(`SELECT COUNT(*)::int total, COUNT(*) FILTER(WHERE dismissed_at IS NOT NULL)::int dismissed FROM warnings WHERE user_id=$1 AND shown_at>=date_trunc('day',now())`,[userId]),
+  pool.query(`SELECT platform, COALESCE(SUM(COALESCE(duration_seconds,0)),0)::int seconds FROM sessions WHERE user_id=$1 AND started_at>=date_trunc('day',now()) GROUP BY platform ORDER BY seconds DESC`,[userId]),
+  pool.query(`SELECT ar.category, COUNT(*)::int count FROM analysis_results ar JOIN content_events ce ON ce.id=ar.content_event_id JOIN sessions s ON s.id=ce.session_id WHERE s.user_id=$1 AND ce.occurred_at>=date_trunc('day',now()) GROUP BY ar.category ORDER BY count DESC`,[userId])
+ ]); const total=usage.rows[0].total; return { totalSeconds:total, weeklySeconds:total, longestSeconds:usage.rows[0].longest, sessions:Number(usage.rows[0].sessions), warnings:Number(warnings.rows[0].total), dismissedWarnings:Number(warnings.rows[0].dismissed), platforms:platforms.rows, categories:cats.rows, empty:total===0 };
 }
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  try {
-    if (url.pathname === '/api/health') return json(res, 200, { status:'ok', service:'safescroll-api', time:new Date().toISOString() });
-    if (url.pathname === '/api/profiles' && req.method === 'GET') return json(res, 200, Object.entries(store.profiles).map(([id, p]) => ({ id, label:p.label, age:AGE[id] })));
-    if (url.pathname === '/api/connectors' && req.method === 'GET') return json(res, 200, connectorStatus());
-    if (url.pathname === '/api/state' && req.method === 'GET') { const state = snapshot(url.searchParams.get('profile') || 'minor'); return state ? json(res, 200, state) : json(res, 404, { error:'Unknown profile' }); }
-    if (url.pathname === '/api/events' && req.method === 'POST') { const input = await body(req); if (!validEvent(input)) return json(res, 422, { error:'profileId, category, and platform are required.' }); const update = await handleEvent(input); return json(res, 201, update); }
-    if (url.pathname === '/api/goals' && req.method === 'PATCH') { const input = await body(req), p = store.profiles[input.profileId]; if (!p || !Number.isInteger(input.goal) || input.goal < 15 || input.goal > 1440) return json(res, 422, { error:'A valid profileId and goal (15–1440 minutes) are required.' }); p.goal = input.goal; await persist(); const update = { type:'preferences.updated', profileId:input.profileId, snapshot:snapshot(input.profileId) }; broadcast(update); return json(res, 200, update); }
-    if (url.pathname === '/api/stream' && req.method === 'GET') { res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive', 'X-Accel-Buffering':'no' }); res.write(': connected\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
-    const name = url.pathname === '/' ? 'index.html' : normalize(url.pathname).replace(/^[/\\]+/, ''); const data = await readFile(join(root, name)); res.writeHead(200, { 'Content-Type':types[extname(name)] || 'application/octet-stream', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' }); res.end(data);
-  } catch (error) { const status = error instanceof SyntaxError ? 400 : 404; json(res, status, { error: status === 400 ? 'Invalid JSON request body.' : 'Not found.' }); }
-});
-await loadStore();
-server.listen(port, host, () => console.log(`SafeScroll API and web app running at http://${host}:${port}`));
+const server=createServer(async(req,res)=>{const url=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{
+  if(url.pathname==='/api/health')return json(res,200,{status:'ok',database:'postgresql'});
+  if(url.pathname==='/auth/register'&&req.method==='POST'){const b=await parse(req), email=String(b.email||'').trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(email)||String(b.password||'').length<10||!age(b.ageGroup)||b.consent!==true)return json(res,422,{error:'Use a valid email, a 10+ character password, an age group, and accept consent.'});const id=randomUUID();try{await pool.query('INSERT INTO users(id,email,password_hash,age_group,consent_at) VALUES($1,$2,$3,$4,now())',[id,email,await bcrypt.hash(b.password,12),b.ageGroup]);return json(res,201,{token:jwt.sign({sub:id,email},jwtSecret,{expiresIn:'8h'}),user:{id,email,ageGroup:b.ageGroup}});}catch(e){return json(res,e.code==='23505'?409:500,{error:e.code==='23505'?'An account already exists for this email.':'Registration failed.'});}}
+  if(url.pathname==='/auth/login'&&req.method==='POST'){const b=await parse(req), email=String(b.email||'').trim().toLowerCase(),r=await pool.query('SELECT id,email,password_hash,age_group FROM users WHERE email=$1',[email]);if(!r.rowCount||!await bcrypt.compare(String(b.password||''),r.rows[0].password_hash))return json(res,401,{error:'Incorrect email or password.'});const x=r.rows[0];return json(res,200,{token:jwt.sign({sub:x.id,email:x.email},jwtSecret,{expiresIn:'8h'}),user:{id:x.id,email:x.email,ageGroup:x.age_group}});}
+  if(url.pathname==='/auth/me'&&req.method==='GET'){const u=requireUser(req,res);if(!u)return;const r=await pool.query('SELECT id,email,age_group FROM users WHERE id=$1',[u.sub]);return r.rowCount?json(res,200,{user:{id:r.rows[0].id,email:r.rows[0].email,ageGroup:r.rows[0].age_group}}):json(res,401,{error:'Account not found.'});}
+  if(url.pathname==='/auth/logout'&&req.method==='POST')return json(res,204,{});
+  const u=requireUser(req,res);if(!u)return;
+  if(url.pathname==='/sessions/start'&&req.method==='POST'){const b=await parse(req);if(!['youtube','instagram','facebook','x'].includes(b.platform))return json(res,422,{error:'Unsupported platform.'});const id=randomUUID();await pool.query('INSERT INTO sessions(id,user_id,platform) VALUES($1,$2,$3)',[id,u.sub,b.platform]);return json(res,201,{sessionId:id});}
+  if(url.pathname==='/sessions/end'&&req.method==='POST'){const b=await parse(req),r=await pool.query(`UPDATE sessions SET ended_at=now(),duration_seconds=EXTRACT(EPOCH FROM(now()-started_at))::int WHERE id=$1 AND user_id=$2 AND ended_at IS NULL RETURNING *`,[b.sessionId,u.sub]);return r.rowCount?json(res,200,{session:r.rows[0]}):json(res,404,{error:'Active session not found.'});}
+  if(url.pathname==='/content/event'&&req.method==='POST'){const b=await parse(req);if(!b.sessionId||typeof b.title!=='string'||b.title.length>500||typeof b.url!=='string'||b.url.length>2000)return json(res,422,{error:'Valid sessionId, title, and URL are required.'});const s=await pool.query('SELECT s.*,u.age_group FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.user_id=$2 AND s.ended_at IS NULL',[b.sessionId,u.sub]);if(!s.rowCount)return json(res,404,{error:'Active session not found.'});const a=analyzeContent({title:b.title,description:b.description,url:b.url});const eventId=randomUUID(),resultId=randomUUID();await pool.query('INSERT INTO content_events(id,session_id,platform,content_identifier,page_url,content_hash,title) VALUES($1,$2,$3,$4,$5,$6,$7)',[eventId,b.sessionId,s.rows[0].platform,b.contentIdentifier?.slice(0,200)||null,b.url.slice(0,2000),a.contentHash,b.title]);await pool.query('INSERT INTO analysis_results(id,content_event_id,category,risk_level,confidence,explanation,claim_classification,evidence_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[resultId,eventId,a.category,a.risk,a.confidence,a.explanation,a.claim,JSON.stringify(a.evidence)]);const elapsed=Math.floor((Date.now()-new Date(s.rows[0].started_at))/1000),w=policy({ageGroup:s.rows[0].age_group,analysis:a,continuousSeconds:elapsed});let warning=null;if(w){const id=randomUUID();await pool.query('INSERT INTO warnings(id,user_id,analysis_result_id,warning_type,severity,message) VALUES($1,$2,$3,$4,$5,$6)',[id,u.sub,resultId,w.type,w.severity,w.message]);warning={id,...w};}const out={analysis:a,warning,summary:await summary(u.sub)};emit(u.sub,{type:'analytics.updated',...out});return json(res,201,out);}
+  if(url.pathname==='/analytics/summary'&&req.method==='GET')return json(res,200,await summary(u.sub));
+  if(url.pathname==='/analytics/warnings'&&req.method==='GET'){const r=await pool.query('SELECT id,warning_type,severity,message,shown_at,dismissed_at FROM warnings WHERE user_id=$1 ORDER BY shown_at DESC LIMIT 100',[u.sub]);return json(res,200,r.rows);}
+  if(url.pathname.startsWith('/warnings/')&&url.pathname.endsWith('/dismiss')&&req.method==='POST'){const id=url.pathname.split('/')[2],r=await pool.query('UPDATE warnings SET dismissed_at=now() WHERE id=$1 AND user_id=$2 AND dismissed_at IS NULL RETURNING id',[id,u.sub]);return r.rowCount?json(res,200,{dismissed:true}):json(res,404,{error:'Warning not found.'});}
+  if(url.pathname==='/api/stream'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache',Connection:'keep-alive'});res.write(': connected\n\n');const set=streams.get(u.sub)||new Set();set.add(res);streams.set(u.sub,set);req.on('close',()=>set.delete(res));return;}
+  const name=url.pathname==='/'?'index.html':normalize(url.pathname).replace(/^[/\\]+/,'');const data=await readFile(join(root,name));res.writeHead(200,{'Content-Type':types[extname(name)]||'application/octet-stream','X-Content-Type-Options':'nosniff'});res.end(data);
+}catch(e){console.error(e);json(res,e instanceof SyntaxError?400:500,{error:e instanceof SyntaxError?'Invalid JSON request body.':'Service unavailable. Please try again.'});}});
+await migrate();server.listen(port,host,()=>console.log(`SafeScroll running at http://${host}:${port}`));

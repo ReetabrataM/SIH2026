@@ -1,0 +1,1 @@
+const q=s=>document.querySelector(s);chrome.storage.local.get({apiUrl:'http://localhost:4173',token:''},x=>{q('#apiUrl').value=x.apiUrl;q('#token').value=x.token});q('#save').onclick=()=>chrome.storage.local.set({apiUrl:q('#apiUrl').value.replace(/\/$/,''),token:q('#token').value},()=>q('#result').textContent='Saved');

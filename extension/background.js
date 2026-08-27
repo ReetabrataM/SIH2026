@@ -1,0 +1,7 @@
+const API_DEFAULT='http://localhost:4173';const sessions=new Map();
+const platform=url=>url.includes('youtube.com')?'youtube':url.includes('instagram.com')?'instagram':null;
+async function settings(){return await chrome.storage.local.get({apiUrl:API_DEFAULT,token:''});}
+async function request(path,body){const s=await settings();const r=await fetch(`${s.apiUrl}${path}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${s.token}`},body:JSON.stringify(body)});if(!r.ok)throw new Error((await r.json()).error||'Request failed');return r.status===204?{}:r.json();}
+chrome.tabs.onUpdated.addListener(async(id,change,tab)=>{if(change.status!=='complete'||!tab.url)return;const p=platform(tab.url);if(!p)return;try{const x=await request('/sessions/start',{platform:p});sessions.set(id,x.sessionId);chrome.tabs.sendMessage(id,{type:'guard-state',state:'safe'});}catch{chrome.tabs.sendMessage(id,{type:'guard-state',state:'offline'});}});
+chrome.tabs.onRemoved.addListener(async id=>{const sessionId=sessions.get(id);if(sessionId){try{await request('/sessions/end',{sessionId});}catch{}sessions.delete(id);}});
+chrome.runtime.onMessage.addListener((m,s,send)=>{if(m.type!=='content-event')return;const sessionId=sessions.get(s.tab.id);if(!sessionId)return;request('/content/event',{sessionId,title:m.title,url:m.url,description:m.description||'',contentIdentifier:m.contentIdentifier||''}).then(x=>send(x)).catch(e=>send({error:e.message}));return true;});

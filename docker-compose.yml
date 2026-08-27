@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: safescroll
+      POSTGRES_USER: safescroll
+      POSTGRES_PASSWORD: change-me-in-production
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U safescroll]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  app:
+    build: .
+    ports: ["4173:4173"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4173
+      DATABASE_URL: postgresql://safescroll:change-me-in-production@db:5432/safescroll
+      JWT_SECRET: replace-with-a-long-random-production-secret
+    depends_on:
+      db: { condition: service_healthy }
+volumes:
+  postgres_data:

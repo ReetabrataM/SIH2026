@@ -42,6 +42,14 @@ The service boundaries are deliberately modular: `src/engine.js` holds the class
 
 Prerequisite: Node.js 20+.
 
+The real application API requires PostgreSQL and `JWT_SECRET`. Start the full stack with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+For non-Docker development, copy `.env.example` to `.env`, set a real PostgreSQL connection string and JWT secret, then export those environment variables before starting the server.
+
 ```bash
 npm start
 ```
@@ -61,6 +69,12 @@ npm test
 ```
 
 The included tests cover repeated minor/adult escalation, adult warning behavior, misinformation-risk framing, and score bounds. Add model-evaluation and API tests when integrating real services.
+
+## Browser extension
+
+The `extension/` folder is a Manifest V3 Chrome/Edge extension. In `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select `extension/`. Sign in to SafeScroll, copy the returned API token into the extension's Options page, then open YouTube or Instagram. The extension records only page URL/title/description metadata needed for the stated safety feature; it never collects social-media passwords, cookies, private messages, or tokens.
+
+The API now exposes real registration/login, session, content event, analytics, warning, and live-stream routes. It requires a Bearer token on every non-auth route.
 
 ## Demo flow (5–7 minutes)
 
